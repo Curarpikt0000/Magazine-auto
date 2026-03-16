@@ -2,6 +2,7 @@ import os
 import datetime
 import requests
 import json
+import time
 from google import genai
 from notion_client import Client
 import cloudinary
@@ -32,8 +33,8 @@ def get_script_from_notion(page_id):
     """
     智能读取剧本 (子页面优先版)：
     1. 遍历页面正文，寻找名为“深度解析脚本”的子页面 (Child Page)。
-    2. 提取该子页面内的所有文本。
-    3. 如果没有子页面，备用方案是去读取属性列的内容。
+    2. 提取该子页面内的所有文本内容。
+    3. 如果没有子页面，则读取属性列作为备用。
     """
     child_page_id = None
     
@@ -58,7 +59,7 @@ def get_script_from_notion(page_id):
                 
     page_script = ""
     
-    # 步骤 B：如果找到了子页面，提取里面的所有文字
+    # 步骤 B：提取子页面内容
     if child_page_id:
         child_blocks = []
         has_more = True
@@ -75,7 +76,6 @@ def get_script_from_notion(page_id):
         for block in child_blocks:
             b_type = block["type"]
             text = ""
-            # 支持提取段落、引用、各种标题和列表
             if b_type in ["paragraph", "callout", "quote", "heading_1", "heading_2", "heading_3", "bulleted_list_item", "numbered_list_item"]:
                 text = "".join([t["plain_text"] for t in block[b_type].get("rich_text", [])])
                 if text.strip():
@@ -86,14 +86,14 @@ def get_script_from_notion(page_id):
             print(" -> 已成功从子页面提取剧本。")
             return page_script
 
-    # 步骤 C：备用方案，如果没建子页面，就去读属性列
+    # 步骤 C：备用方案
     try:
         page_info = notion.request(path=f"pages/{page_id}", method="GET")
         prop_script = "".join([t["plain_text"] for t in page_info["properties"].get("深度解析脚本", {}).get("rich_text", [])])
         if len(prop_script) > 10:
             print(" -> 未发现子页面，已从属性列提取短剧本。")
             return prop_script
-    except Exception as e:
+    except Exception:
         pass
         
     return None
@@ -105,10 +105,9 @@ def text_to_speech(text, output_path):
         "Content-Type": "application/json",
         "xi-api-key": ELEVEN_API_KEY
     }
-    # 截断防爆，ElevenLabs 单次限制较长，这里安全截断
     data = {
         "text": text[:4900],
-        "model_id": "eleven_multilingual_v3",
+        "model_id": "eleven_multilingual_v2",  # ⚠️ 已降级至 v2 以确保 API 兼容性
         "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}
     }
     try:
@@ -125,6 +124,11 @@ def text_to_speech(text, output_path):
 
 def generate_visual_assets(page_id, script_text, style_seed):
     print(f"正在根据风格 [{style_seed}] 拆解视觉分镜...")
+    
+    # ⚠️ 强制等待 15 秒，避免触发 Gemini 免费版 429 频率限制
+    print(" -> 等待 API 冷却中 (15s)...")
+    time.sleep(15)
+    
     prompt = f"""
     请根据以下视频剧本和给定的视觉风格种子 '{style_seed}'，将剧本拆分为 10 个视频章节。
     请输出纯 JSON 格式的数组。
@@ -140,7 +144,6 @@ def generate_visual_assets(page_id, script_text, style_seed):
         json_str = response.text.strip().removeprefix("```json").removesuffix("```").strip()
         chapters = json.loads(json_str)
         
-        # 直接发送 HTTP POST 请求新建内嵌表格
         new_db = notion.request(
             path="databases",
             method="POST",
@@ -205,7 +208,6 @@ def process_magazine():
 
     for page in tasks:
         page_id = page["id"]
-        
         seed_prop = page["properties"].get("视觉风格种子", {}).get("rich_text", [])
         style_seed = "".join([t["plain_text"] for t in seed_prop]) if seed_prop else "白色、淡蓝色、极简科技感"
         
@@ -215,7 +217,7 @@ def process_magazine():
         script_text = get_script_from_notion(page_id)
         
         if not script_text:
-            print("⚠️ 未能找到名为“深度解析脚本”的子页面或属性内容，跳过此任务。")
+            print("⚠️ 未能找到剧本子页面或属性内容，跳过。")
             continue
             
         print(f" -> 成功获取 {len(script_text)} 字剧本。")
