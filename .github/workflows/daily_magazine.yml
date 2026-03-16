@@ -10,17 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4  # ⚠️ 已升级，消除 Node.js 警告
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5  # ⚠️ 已升级，消除 Node.js 警告
         with:
           python-version: '3.11'
 
       - name: Install dependencies
-        # ⚠️ 关键修复：锁定 notion-client 版本为旧版稳定版 (<3.0.0)
+        # 不再纠结降级，直接安装最新版
         run: |
-          pip install "notion-client<3.0.0" google-genai requests cloudinary
+          pip install notion-client google-genai requests cloudinary
 
       - name: Run Auto-Pilot
         env:
