@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         # ⚠️ 新增了 pypdf 库用于本地解析 PDF
         run: |
-          pip install notion-client google-genai requests cloudinary pypdf
+          pip install notion-client google-genai requests cloudinary pymupdf
 
       - name: Run Auto-Pilot
         env:
