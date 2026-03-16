@@ -2,13 +2,10 @@ import os
 import datetime
 import requests
 import json
-import time
 from google import genai
 from notion_client import Client
 import cloudinary
 import cloudinary.uploader
-import fitz  # PDF 解析库
-import docx  # ⚠️ 新增的 Word 解析库
 
 # ==========================================
 # 1. 环境与密钥配置
@@ -20,6 +17,7 @@ ELEVEN_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID")
 CLOUDINARY_URL = os.environ.get("CLOUDINARY_URL")
 
+# 锁定经典版本 API，最稳定
 notion = Client(auth=NOTION_TOKEN, notion_version="2022-06-28")
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -29,78 +27,76 @@ if CLOUDINARY_URL:
 # ==========================================
 # 2. 核心功能函数库
 # ==========================================
-def download_file(url, local_path):
-    try:
-        response = requests.get(url, stream=True, timeout=30)
-        if response.status_code == 200:
-            with open(local_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            return True
-    except Exception as e:
-        print(f"下载文件失败: {e}")
-    return False
 
-def extract_text_from_pdf(pdf_path, max_chars=40000):
-    text = ""
-    try:
-        doc = fitz.open(pdf_path)
-        for page in doc:
-            extracted = page.get_text()
-            if extracted:
-                text += extracted + "\n"
-            if len(text) > max_chars:
-                break
-        doc.close()
-    except Exception as e:
-        print(f"⚠️ PDF 本地解析出错: {e}")
-    return text[:max_chars]
-
-def extract_text_from_docx(docx_path, max_chars=40000):
-    """⚠️ 新增功能：专门解析 Word 文档"""
-    text = ""
-    try:
-        doc = docx.Document(docx_path)
-        for para in doc.paragraphs:
-            if para.text.strip():
-                text += para.text + "\n"
-            if len(text) > max_chars:
-                break
-    except Exception as e:
-        print(f"⚠️ Word 本地解析出错: {e}")
-    return text[:max_chars]
-
-def write_script_to_notion(page_id, script_text):
-    if len(script_text) <= 2000:
-        notion.request(
-            path=f"pages/{page_id}",
-            method="PATCH",
-            body={"properties": {"深度解析脚本": {"rich_text": [{"text": {"content": script_text}}]}}}
-        )
-        print(" -> 脚本较短，已直接写入属性列。")
-    else:
-        notion.request(
-            path=f"pages/{page_id}",
-            method="PATCH",
-            body={"properties": {"深度解析脚本": {"rich_text": [{"text": {"content": "⚠️ 剧本字数超限，完整内容已写入下方页面正文。"}}]}}}
-        )
+def get_script_from_notion(page_id):
+    """
+    智能读取剧本 (子页面优先版)：
+    1. 遍历页面正文，寻找名为“深度解析脚本”的子页面 (Child Page)。
+    2. 提取该子页面内的所有文本。
+    3. 如果没有子页面，备用方案是去读取属性列的内容。
+    """
+    child_page_id = None
+    
+    # 步骤 A：寻找目标子页面
+    blocks = []
+    has_more = True
+    next_cursor = None
+    while has_more:
+        url = f"blocks/{page_id}/children?page_size=100"
+        if next_cursor:
+            url += f"&start_cursor={next_cursor}"
+        res = notion.request(path=url, method="GET")
+        blocks.extend(res.get("results", []))
+        has_more = res.get("has_more", False)
+        next_cursor = res.get("next_cursor")
         
-        children_blocks = [
-            {"object": "block", "type": "divider", "divider": {}},
-            {"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"text": {"content": "🎙️ AI 深度解析剧本"}}]}}
-        ]
-        chunks = [script_text[i:i+1500] for i in range(0, len(script_text), 1500)]
-        for chunk in chunks:
-            children_blocks.append(
-                {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": chunk}}]}}
-            )
+    for block in blocks:
+        if block["type"] == "child_page":
+            if "深度解析脚本" in block["child_page"]["title"]:
+                child_page_id = block["id"]
+                break
+                
+    page_script = ""
+    
+    # 步骤 B：如果找到了子页面，提取里面的所有文字
+    if child_page_id:
+        child_blocks = []
+        has_more = True
+        next_cursor = None
+        while has_more:
+            url = f"blocks/{child_page_id}/children?page_size=100"
+            if next_cursor:
+                url += f"&start_cursor={next_cursor}"
+            res = notion.request(path=url, method="GET")
+            child_blocks.extend(res.get("results", []))
+            has_more = res.get("has_more", False)
+            next_cursor = res.get("next_cursor")
             
-        notion.request(
-            path=f"blocks/{page_id}/children",
-            method="PATCH",
-            body={"children": children_blocks}
-        )
-        print(" -> 脚本较长，已安全切割并写入页面正文。")
+        for block in child_blocks:
+            b_type = block["type"]
+            text = ""
+            # 支持提取段落、引用、各种标题和列表
+            if b_type in ["paragraph", "callout", "quote", "heading_1", "heading_2", "heading_3", "bulleted_list_item", "numbered_list_item"]:
+                text = "".join([t["plain_text"] for t in block[b_type].get("rich_text", [])])
+                if text.strip():
+                    page_script += text.strip() + "\n"
+                    
+        page_script = page_script.strip()
+        if len(page_script) > 10:
+            print(" -> 已成功从子页面提取剧本。")
+            return page_script
+
+    # 步骤 C：备用方案，如果没建子页面，就去读属性列
+    try:
+        page_info = notion.request(path=f"pages/{page_id}", method="GET")
+        prop_script = "".join([t["plain_text"] for t in page_info["properties"].get("深度解析脚本", {}).get("rich_text", [])])
+        if len(prop_script) > 10:
+            print(" -> 未发现子页面，已从属性列提取短剧本。")
+            return prop_script
+    except Exception as e:
+        pass
+        
+    return None
 
 def text_to_speech(text, output_path):
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
@@ -109,6 +105,7 @@ def text_to_speech(text, output_path):
         "Content-Type": "application/json",
         "xi-api-key": ELEVEN_API_KEY
     }
+    # 截断防爆，ElevenLabs 单次限制较长，这里安全截断
     data = {
         "text": text[:4900],
         "model_id": "eleven_multilingual_v3",
@@ -143,6 +140,7 @@ def generate_visual_assets(page_id, script_text, style_seed):
         json_str = response.text.strip().removeprefix("```json").removesuffix("```").strip()
         chapters = json.loads(json_str)
         
+        # 直接发送 HTTP POST 请求新建内嵌表格
         new_db = notion.request(
             path="databases",
             method="POST",
@@ -180,7 +178,7 @@ def generate_visual_assets(page_id, script_text, style_seed):
 # ==========================================
 def process_magazine():
     today = (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).date().isoformat()
-    print(f"=== 开始执行自动制片流 | 日期: {today} ===")
+    print(f"=== 开始执行人机协同制片流 | 日期: {today} ===")
     
     try:
         tasks_response = notion.request(
@@ -191,7 +189,7 @@ def process_magazine():
                     "and": [
                         {"property": "Category", "select": {"equals": "杂志"}},
                         {"property": "阅读日期", "date": {"equals": today}},
-                        {"property": "深度解析脚本", "rich_text": {"is_empty": True}}
+                        {"property": "深度解析音频", "files": {"is_empty": True}}
                     ]
                 }
             }
@@ -202,66 +200,29 @@ def process_magazine():
         return
 
     if not tasks:
-        print(f"未发现今天 ({today}) 需要处理的杂志任务。")
+        print(f"未发现今天 ({today}) 需要处理的配音任务。")
         return
 
     for page in tasks:
         page_id = page["id"]
         
-        req_prop = page["properties"].get("脚本要求", {}).get("rich_text", [])
-        instruction = "".join([t["plain_text"] for t in req_prop]) if req_prop else "请写一份深度讲解脚本。"
-        
         seed_prop = page["properties"].get("视觉风格种子", {}).get("rich_text", [])
         style_seed = "".join([t["plain_text"] for t in seed_prop]) if seed_prop else "白色、淡蓝色、极简科技感"
         
-        files = page["properties"].get("Files & Media", {}).get("files", [])
-        if not files:
-            files = page["properties"].get("Files & media", {}).get("files", [])
-            
-        if not files:
-            print(f"跳过页面 {page_id}：没有找到杂志文件。")
+        print(f"\n--- 开始处理 Page ID: {page_id} ---")
+
+        print("1. 正在从 Notion 读取剧本...")
+        script_text = get_script_from_notion(page_id)
+        
+        if not script_text:
+            print("⚠️ 未能找到名为“深度解析脚本”的子页面或属性内容，跳过此任务。")
             continue
             
-        file_info = files[0]
-        file_url = file_info.get("file", {}).get("url") or file_info.get("external", {}).get("url")
-        file_name = file_info.get("name", "document")
-        local_file_path = os.path.join("/tmp", file_name)
+        print(f" -> 成功获取 {len(script_text)} 字剧本。")
 
-        print(f"\n--- 开始处理: {file_name} ---")
-
-        print("1. 正在下载文件...")
-        if not download_file(file_url, local_file_path):
-            continue
-
-        print("2. 正在本地提取纯文本 (智能瘦身)...")
-        # ⚠️ 自动判断文件类型
-        extracted_text = ""
-        if file_name.lower().endswith('.pdf'):
-            extracted_text = extract_text_from_pdf(local_file_path, max_chars=40000)
-        elif file_name.lower().endswith('.docx'):
-            extracted_text = extract_text_from_docx(local_file_path, max_chars=40000)
-        else:
-            print(f"⚠️ 暂不支持此文件格式，跳过提取。")
-            continue
-            
-        print(f" -> 成功提取 {len(extracted_text)} 字核心内容。")
-
-        if len(extracted_text.strip()) < 100:
-            print("⚠️ 警告：提取到的有效文字极少，将跳过生成步骤。")
-            continue
-
-        print("3. Gemini 正在基于纯文本创作剧本...")
-        combined_prompt = f"{instruction}\n\n以下是提取的核心内容：\n{extracted_text}"
-        response = gemini_client.models.generate_content(
-            model='gemini-2.0-flash', 
-            contents=combined_prompt
-        )
-        generated_script = response.text
-        write_script_to_notion(page_id, generated_script)
-
-        print("4. ElevenLabs 正在生成配音...")
+        print("2. ElevenLabs 正在生成配音...")
         audio_path = f"/tmp/{page_id}.mp3"
-        if text_to_speech(generated_script, audio_path):
+        if text_to_speech(script_text, audio_path):
             print(" -> 正在上传音频至 Cloudinary...")
             upload_result = cloudinary.uploader.upload(audio_path, resource_type="video")
             audio_url = upload_result.get("secure_url")
@@ -273,14 +234,13 @@ def process_magazine():
             )
             print(" -> 音频链接已挂载回 Notion。")
         
-        print("5. 正在规划视频翻页镜头...")
-        generate_visual_assets(page_id, generated_script, style_seed)
+        print("3. 正在规划视频翻页镜头...")
+        generate_visual_assets(page_id, script_text, style_seed)
 
-        print("6. 清理临时环境...")
-        if os.path.exists(local_file_path): os.remove(local_file_path)
+        print("4. 清理临时文件...")
         if os.path.exists(audio_path): os.remove(audio_path)
         
-        print(f"=== {file_name} 自动化流程全部完成！===")
+        print(f"=== 此任务流执行完毕！===")
 
 if __name__ == "__main__":
     process_magazine()
