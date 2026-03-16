@@ -106,7 +106,7 @@ def generate_visual_assets(page_id, script_text, style_seed):
     剧本内容：{script_text[:3000]}
     """
     try:
-        response = gemini_client.models.generate_content(model='gemini-1.5-pro', contents=prompt)
+        response = gemini_client.models.generate_content(model='gemini-1.5-pro-latest', contents=prompt)
         json_str = response.text.strip().removeprefix("```json").removesuffix("```").strip()
         chapters = json.loads(json_str)
         
