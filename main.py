@@ -27,7 +27,7 @@ if CLOUDINARY_URL:
 # ==========================================
 
 def get_script_content(page_id):
-    """自愈式读取：支持子页面读取，失败则报错提醒"""
+    """提取子页面“深度解析脚本”的内容"""
     try:
         blocks = notion.request(path=f"blocks/{page_id}/children", method="GET").get("results", [])
         child_page_id = next((b["id"] for b in blocks if b["type"] == "child_page" and "深度解析脚本" in b["child_page"]["title"]), None)
@@ -43,27 +43,35 @@ def get_script_content(page_id):
                 script_text += text + "\n"
         return script_text
     except Exception as e:
-        print(f"❌ 读取 Notion 脚本失败: {e}")
+        print(f"❌ 读取脚本失败: {e}")
         return None
 
 def generate_storyboard_data(script_text, style_seed):
-    """构思 10 个视觉分镜方案"""
-    print(" -> 🧠 Gemini 正在进行视觉创意策划...")
-    prompt = f"根据剧本和风格种子 '{style_seed}'，输出 10 个视频分镜 JSON 数组：[ {{"time": "00:00", "title": "描述", "prompt": "生图用的英文 Prompt"}} ]。剧本：{script_text[:3000]}"
+    """构思分镜方案 (已修复 f-string 语法错误)"""
+    print(" -> 🧠 Gemini 正在策划视觉分镜...")
+    
+    # 使用单引号包裹 JSON 示例以规避语法冲突
+    prompt = (
+        f"根据剧本和风格种子 '{style_seed}'，输出 10 个视频分镜 JSON 数组。 "
+        f"格式示例: [ {{'time': '00:00', 'title': '描述', 'prompt': 'English prompt'}} ]。 "
+        f"剧本：{script_text[:3000]}"
+    )
+    
     try:
         response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
-        text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
+        # 清洗 JSON 字符串中的潜在字符
+        text = response.text.strip().replace("```json", "").replace("```", "").replace("'", "\"").strip()
         return json.loads(text)
     except Exception as e:
         print(f"❌ 分镜策划报错: {e}")
         return None
 
 def produce_visuals(page_id, chapters):
-    """核心生产工厂：自动尝试生图，若失败则保留 Prompt 占位"""
-    print(f" -> 🎬 视觉工厂启动，共 {len(chapters)} 个分镜...")
+    """创建数据库并生成/挂载图片"""
+    print(f" -> 🎬 视觉工厂启动，处理 {len(chapters)} 个节点...")
     
     try:
-        # 1. 创建数据库
+        # 1. 创建内嵌数据库
         new_db = notion.request(
             path="databases",
             method="POST",
@@ -81,89 +89,78 @@ def produce_visuals(page_id, chapters):
         db_id = new_db["id"]
 
         for index, item in enumerate(chapters):
-            print(f"    🎨 处理分镜 [{index+1}/10]: {item['title']}...")
-            img_url = None
+            print(f"    🎨 处理 [{index+1}/10]: {item.get('title', 'N/A')}...")
+            img_url = "https://res.cloudinary.com/demo/image/upload/v1312461204/sample.jpg" # 默认占位
             
-            # --- ⚠️ 尝试自动生图逻辑 ---
+            # 2. 尝试生图 (自愈逻辑)
             try:
-                # 使用官方指定的生图模型名称
-                # 如果此部分报错，会自动进入 except 流程，不影响整体运行
                 image_response = client.models.generate_images(
-                    model='imagen-3.0-generate-001', # 修正后的生图模型 ID
-                    prompt=item['prompt'],
+                    model='imagen-3.0-generate-001',
+                    prompt=item.get('prompt', ''),
                     config={'number_of_images': 1}
                 )
                 image_bytes = image_response.generated_images[0].image_bytes
                 upload_res = cloudinary.uploader.upload(image_bytes, resource_type="image")
                 img_url = upload_res.get("secure_url")
             except Exception as img_err:
-                print(f"    ⚠️ 生图接口调用受限或失败 (将仅保留提示词): {img_err}")
-                # 备用：占位图 URL，防止 Notion 写入报错
-                img_url = "https://res.cloudinary.com/demo/image/upload/v1312461204/sample.jpg"
+                print(f"    ⚠️ 生图接口跳过 (将保留 Prompt): {img_err}")
 
-            # --- 写入 Notion ---
+            # 3. 写入 Notion 页面
             notion.request(
                 path="pages",
                 method="POST",
                 body={
                     "parent": {"database_id": db_id},
                     "properties": {
-                        "分镜描述": {"title": [{"text": {"content": item['title']}}]},
-                        "建议时间戳": {"rich_text": [{"text": {"content": item['time']}}]},
-                        "AI Prompt": {"rich_text": [{"text": {"content": item['prompt']}}]},
-                        "视觉素材": {"files": [{"name": "storyboard.jpg", "external": {"url": img_url}}]}
+                        "分镜描述": {"title": [{"text": {"content": item.get('title', 'N/A')}}]},
+                        "建议时间戳": {"rich_text": [{"text": {"content": item.get('time', '00:00')}}]},
+                        "AI Prompt": {"rich_text": [{"text": {"content": item.get('prompt', '')}}]},
+                        "视觉素材": {"files": [{"name": "story.jpg", "external": {"url": img_url}}]}
                     }
                 }
             )
-            time.sleep(1) # 频率保护
+            time.sleep(1) 
             
-        print(" -> ✅ 该页面视觉任务已完成。")
+        print(" -> ✅ 任务全部完成。")
     except Exception as e:
-        print(f"❌ 数据库创建失败: {e}")
+        print(f"❌ 流程中断: {e}")
 
-# ==========================================
-# 3. 主程序
-# ==========================================
 def main():
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
     today = now.date().isoformat()
     print(f"=== 视觉生产线启动 | {today} ===")
     
-    try:
-        tasks = notion.request(
-            path=f"databases/{DATABASE_ID}/query",
-            method="POST",
-            body={
-                "filter": {
-                    "and": [
-                        {"property": "Category", "select": {"equals": "杂志"}},
-                        {"property": "阅读日期", "date": {"equals": today}},
-                        {"property": "深度解析音频", "files": {"is_not_empty": True}}
-                    ]
-                }
+    # 筛选今日任务
+    tasks = notion.request(
+        path=f"databases/{DATABASE_ID}/query",
+        method="POST",
+        body={
+            "filter": {
+                "and": [
+                    {"property": "Category", "select": {"equals": "杂志"}},
+                    {"property": "阅读日期", "date": {"equals": today}},
+                    {"property": "深度解析音频", "files": {"is_not_empty": True}}
+                ]
             }
-        ).get("results", [])
-    except Exception as e:
-        print(f"❌ 查询 Notion 失败，请检查 DATABASE_ID: {e}")
-        return
+        }
+    ).get("results", [])
 
     for page in tasks:
         page_id = page["id"]
         
-        # 查重逻辑
+        # 查重
         blocks = notion.request(path=f"blocks/{page_id}/children", method="GET").get("results", [])
-        if any(b["type"] == "child_database" for b in blocks):
-            print(f" -> 任务 {page_id} 已存在素材库，跳过。")
-            continue
+        if any(b["type"] == "child_database" for b in blocks): continue
 
+        # 核心逻辑：读剧本 -> 构思 -> 生产
         script = get_script_content(page_id)
         if not script:
-            print(f" -> 跳过 {page_id}：未找到‘深度解析脚本’子页面。")
+            print(f" -> 跳过 {page_id}: 未发现‘深度解析脚本’页面。")
             continue
             
-        style_seed = "".join([t["plain_text"] for t in page["properties"].get("视觉风格种子", {}).get("rich_text", [])]) or "极简科技感"
+        style = "".join([t["plain_text"] for t in page["properties"].get("视觉风格种子", {}).get("rich_text", [])]) or "极简科技感"
         
-        chapters = generate_storyboard_data(script, style_seed)
+        chapters = generate_storyboard_data(script, style)
         if chapters:
             produce_visuals(page_id, chapters)
 
