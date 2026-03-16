@@ -2,9 +2,8 @@ name: Magazine Auto-Pilot
 
 on:
   schedule:
-    # 每天 JST 23:59 运行 (UTC 14:59)
     - cron: '59 14 * * *'
-  workflow_dispatch: # 允许手动点击运行，方便测试
+  workflow_dispatch:
 
 jobs:
   build:
@@ -16,12 +15,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11' # ⚠️ 已升级到安全的 3.11 版本
+          python-version: '3.11'
 
       - name: Install dependencies
-        # ⚠️ 更新了官方最新的 google-genai 包，并确保安装了 cloudinary
+        # ⚠️ 关键修复：锁定 notion-client 版本为旧版稳定版 (<3.0.0)
         run: |
-          pip install notion-client google-genai requests cloudinary
+          pip install "notion-client<3.0.0" google-genai requests cloudinary
 
       - name: Run Auto-Pilot
         env:
@@ -31,5 +30,4 @@ jobs:
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
           ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
           CLOUDINARY_URL: ${{ secrets.CLOUDINARY_URL }}
-        # 强制输出日志
         run: python -u main.py
