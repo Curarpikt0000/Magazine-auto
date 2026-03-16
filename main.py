@@ -18,7 +18,6 @@ ELEVEN_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID")
 CLOUDINARY_URL = os.environ.get("CLOUDINARY_URL")
 
-# 锁定经典版本 API，最稳定
 notion = Client(auth=NOTION_TOKEN, notion_version="2022-06-28")
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -30,15 +29,7 @@ if CLOUDINARY_URL:
 # ==========================================
 
 def get_script_from_notion(page_id):
-    """
-    智能读取剧本 (子页面优先版)：
-    1. 遍历页面正文，寻找名为“深度解析脚本”的子页面 (Child Page)。
-    2. 提取该子页面内的所有文本内容。
-    3. 如果没有子页面，则读取属性列作为备用。
-    """
     child_page_id = None
-    
-    # 步骤 A：寻找目标子页面
     blocks = []
     has_more = True
     next_cursor = None
@@ -58,8 +49,6 @@ def get_script_from_notion(page_id):
                 break
                 
     page_script = ""
-    
-    # 步骤 B：提取子页面内容
     if child_page_id:
         child_blocks = []
         has_more = True
@@ -75,7 +64,6 @@ def get_script_from_notion(page_id):
             
         for block in child_blocks:
             b_type = block["type"]
-            text = ""
             if b_type in ["paragraph", "callout", "quote", "heading_1", "heading_2", "heading_3", "bulleted_list_item", "numbered_list_item"]:
                 text = "".join([t["plain_text"] for t in block[b_type].get("rich_text", [])])
                 if text.strip():
@@ -86,7 +74,6 @@ def get_script_from_notion(page_id):
             print(" -> 已成功从子页面提取剧本。")
             return page_script
 
-    # 步骤 C：备用方案
     try:
         page_info = notion.request(path=f"pages/{page_id}", method="GET")
         prop_script = "".join([t["plain_text"] for t in page_info["properties"].get("深度解析脚本", {}).get("rich_text", [])])
@@ -95,7 +82,6 @@ def get_script_from_notion(page_id):
             return prop_script
     except Exception:
         pass
-        
     return None
 
 def text_to_speech(text, output_path):
@@ -107,11 +93,12 @@ def text_to_speech(text, output_path):
     }
     data = {
         "text": text[:4900],
-        "model_id": "eleven_multilingual_v2",  # ⚠️ 已降级至 v2 以确保 API 兼容性
+        "model_id": "eleven_multilingual_v2",
         "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}
     }
     try:
-        response = requests.post(url, json=data, headers=headers, timeout=60)
+        # ⚠️ 增加了 timeout 到 300 秒，防止长文合成超时
+        response = requests.post(url, json=data, headers=headers, timeout=300)
         if response.status_code == 200:
             with open(output_path, "wb") as f:
                 f.write(response.content)
@@ -125,9 +112,9 @@ def text_to_speech(text, output_path):
 def generate_visual_assets(page_id, script_text, style_seed):
     print(f"正在根据风格 [{style_seed}] 拆解视觉分镜...")
     
-    # ⚠️ 强制等待 15 秒，避免触发 Gemini 免费版 429 频率限制
-    print(" -> 等待 API 冷却中 (15s)...")
-    time.sleep(15)
+    # ⚠️ 增加冷却时间至 60 秒，彻底解决免费版频率限制
+    print(" -> 为确保长剧本处理不触发限制，强制冷却中 (60s)...")
+    time.sleep(60)
     
     prompt = f"""
     请根据以下视频剧本和给定的视觉风格种子 '{style_seed}'，将剧本拆分为 10 个视频章节。
@@ -176,9 +163,6 @@ def generate_visual_assets(page_id, script_text, style_seed):
     except Exception as e:
         print(f"视觉分镜生成失败: {e}")
 
-# ==========================================
-# 3. 主干执行流程
-# ==========================================
 def process_magazine():
     today = (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).date().isoformat()
     print(f"=== 开始执行人机协同制片流 | 日期: {today} ===")
@@ -217,7 +201,7 @@ def process_magazine():
         script_text = get_script_from_notion(page_id)
         
         if not script_text:
-            print("⚠️ 未能找到剧本子页面或属性内容，跳过。")
+            print("⚠️ 未能找到剧本，跳过。")
             continue
             
         print(f" -> 成功获取 {len(script_text)} 字剧本。")
