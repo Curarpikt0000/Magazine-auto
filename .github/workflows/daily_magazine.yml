@@ -18,9 +18,9 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        # ⚠️ 新增了 python-docx 库，让系统具备读取 Word 的能力
+        # ⚠️ 已经移除了所有沉重的文档解析库，只保留四大核心库，运行速度起飞！
         run: |
-          pip install notion-client google-genai requests cloudinary pymupdf python-docx
+          pip install notion-client google-genai requests cloudinary
 
       - name: Run Auto-Pilot
         env:
