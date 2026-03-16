@@ -16,15 +16,20 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.11' # ⚠️ 已升级到安全的 3.11 版本
 
       - name: Install dependencies
+        # ⚠️ 更新了官方最新的 google-genai 包，并确保安装了 cloudinary
         run: |
-          pip install notion-client google-generativeai requests
+          pip install notion-client google-genai requests cloudinary
 
       - name: Run Auto-Pilot
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} # 您还需要去 aistudio.google.com 申请一个免费 KEY 放入 Secrets
-        run: python main.py
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} 
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
+          CLOUDINARY_URL: ${{ secrets.CLOUDINARY_URL }}
+        # 强制输出日志
+        run: python -u main.py
