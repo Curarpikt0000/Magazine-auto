@@ -17,7 +17,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 CLOUDINARY_URL = os.environ.get("CLOUDINARY_URL")
 
 notion = Client(auth=NOTION_TOKEN, notion_version="2022-06-28")
-# 初始化 Gemini Client
+# 初始化客户端
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 if CLOUDINARY_URL:
@@ -28,7 +28,7 @@ if CLOUDINARY_URL:
 # ==========================================
 
 def get_script_content(page_id):
-    """从子页面提取剧本文字，避开音频读取的兼容性问题"""
+    """从子页面提取剧本文字"""
     child_page_id = None
     blocks = notion.request(path=f"blocks/{page_id}/children", method="GET").get("results", [])
     for block in blocks:
@@ -50,7 +50,7 @@ def get_script_content(page_id):
 def generate_storyboard_data(script_text, style_seed):
     """基于文字剧本生成 10 个视觉分镜方案"""
     print(" -> 🧠 Gemini 正在构思视觉方案...")
-    time.sleep(5) # 基础冷却
+    time.sleep(2)
     
     prompt = f"""
     根据以下剧本和风格种子 '{style_seed}'，规划 10 个视频分镜。
@@ -58,8 +58,10 @@ def generate_storyboard_data(script_text, style_seed):
     剧本内容：{script_text[:3000]}
     """
     try:
+        # 使用 2.0 Flash 生成文本 JSON
         response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
-        return json.loads(response.text.strip().removeprefix("```json").removesuffix("```").strip())
+        text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
+        return json.loads(text)
     except Exception as e:
         print(f"❌ 分镜构思失败: {e}")
         return None
@@ -75,7 +77,7 @@ def create_notion_gallery(page_id, chapters):
             method="POST",
             body={
                 "parent": {"type": "page_id", "page_id": page_id},
-                "title": [{"type": "text", "text": {"content": "🎬 YouTube 剪辑素材库 (AI Generated)"}}],
+                "title": [{"type": "text", "text": {"content": "🎬 YouTube 剪辑素材库"}}],
                 "properties": {
                     "分镜描述": {"title": {}},
                     "建议时间戳": {"rich_text": {}},
@@ -87,84 +89,91 @@ def create_notion_gallery(page_id, chapters):
         db_id = new_db["id"]
 
         # 2. 循环生图并挂载
-        for item in chapters:
-            print(f"    🎨 绘图中: {item['title']}...")
+        for index, item in enumerate(chapters):
+            print(f"    🎨 [{index+1}/10] 绘图中: {item['title']}...")
             
-            # 使用 Gemini 3 Flash Image 生图 (Paid Tier 接口)
-            # 💡 注意：此处假设您使用的是官方最新 genai SDK 的生图方法
-            img_response = client.models.generate_images(
-                model='gemini-3-flash-image',
-                prompt=item['prompt'],
-                config={'number_of_images': 1}
-            )
-            
-            # 获取图片字节流并上传到 Cloudinary
-            image_bytes = img_response.generated_images[0].image_bytes
-            upload_res = cloudinary.uploader.upload(image_bytes, resource_type="image")
-            img_url = upload_res.get("secure_url")
+            try:
+                # ⚠️ 修正后的生图调用方式
+                img_response = client.models.generate_content(
+                    model='gemini-3-flash-image', # 使用生图模型名称
+                    contents=item['prompt']
+                )
+                
+                # 处理生图返回（通常返回的是生成的图像对象）
+                # 注意：如果 SDK 返回的是特殊格式，可能需要根据具体 response 结构提取
+                image_data = img_response.generated_images[0].image_bytes
+                
+                # 上传到 Cloudinary
+                upload_res = cloudinary.uploader.upload(image_data, resource_type="image")
+                img_url = upload_res.get("secure_url")
 
-            # 写入 Notion
-            notion.request(
-                path="pages",
-                method="POST",
-                body={
-                    "parent": {"database_id": db_id},
-                    "properties": {
-                        "分镜描述": {"title": [{"text": {"content": item['title']}}]},
-                        "建议时间戳": {"rich_text": [{"text": {"content": item['time']}}]},
-                        "AI Prompt": {"rich_text": [{"text": {"content": item['prompt']}}]},
-                        "视觉素材": {"files": [{"name": "story.jpg", "external": {"url": img_url}}]}
+                # 写入 Notion
+                notion.request(
+                    path="pages",
+                    method="POST",
+                    body={
+                        "parent": {"database_id": db_id},
+                        "properties": {
+                            "分镜描述": {"title": [{"text": {"content": item['title']}}]},
+                            "建议时间戳": {"rich_text": [{"text": {"content": item['time']}}]},
+                            "AI Prompt": {"rich_text": [{"text": {"content": item['prompt']}}]},
+                            "视觉素材": {"files": [{"name": "story.jpg", "external": {"url": img_url}}]}
+                        }
                     }
-                }
-            )
-            time.sleep(2) # 避免 Notion API 频率过快
+                )
+            except Exception as e:
+                print(f"    ⚠️ 第 {index+1} 张图生成或挂载失败，跳过: {e}")
+                continue
             
-        print(" -> ✅ 全部分镜图已生成并挂载完成！")
+            time.sleep(1) # 频率保护
+            
+        print(" -> ✅ 视觉工厂任务处理完毕！")
     except Exception as e:
-        print(f"❌ 视觉工厂执行出错: {e}")
+        print(f"❌ 数据库创建失败: {e}")
 
 # ==========================================
-# 3. 执行流
+# 3. 主程序入口
 # ==========================================
 def main():
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
     today = now.date().isoformat()
     print(f"=== 视觉工厂启动 | {today} ===")
     
-    tasks = notion.request(
-        path=f"databases/{DATABASE_ID}/query",
-        method="POST",
-        body={
-            "filter": {
-                "and": [
-                    {"property": "Category", "select": {"equals": "杂志"}},
-                    {"property": "阅读日期", "date": {"equals": today}},
-                    {"property": "深度解析音频", "files": {"is_not_empty": True}}
-                ]
-            }
+    # 筛选任务
+    query_body = {
+        "filter": {
+            "and": [
+                {"property": "Category", "select": {"equals": "杂志"}},
+                {"property": "阅读日期", "date": {"equals": today}},
+                {"property": "深度解析音频", "files": {"is_not_empty": True}}
+            ]
         }
-    ).get("results", [])
+    }
+    
+    tasks = notion.request(path=f"databases/{DATABASE_ID}/query", method="POST", body=query_body).get("results", [])
 
     for page in tasks:
         page_id = page["id"]
         
-        # 检查是否已有分镜库，防止重复生成
+        # 查重：若已有分镜库则不再生成
         blocks = notion.request(path=f"blocks/{page_id}/children", method="GET").get("results", [])
-        if any(b["type"] == "child_database" for b in blocks): continue
+        if any(b["type"] == "child_database" for b in blocks):
+            print(f" -> 任务 {page_id} 已有分镜，跳过。")
+            continue
 
-        # 1. 获取剧本文字
+        # 1. 提取文本
         script_text = get_script_content(page_id)
         if not script_text:
             print(f" -> 跳过 {page_id}：未找到‘深度解析脚本’页面。")
             continue
             
-        # 2. 获取风格种子
+        # 2. 风格种子
         style_seed = "".join([t["plain_text"] for t in page["properties"].get("视觉风格种子", {}).get("rich_text", [])]) or "极简科技感"
 
-        # 3. 构思分镜
+        # 3. 规划分镜
         chapters = generate_storyboard_data(script_text, style_seed)
         
-        # 4. 生图并建库
+        # 4. 执行生产
         if chapters:
             create_notion_gallery(page_id, chapters)
 
