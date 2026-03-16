@@ -2,8 +2,8 @@ name: Magazine Auto-Pilot
 
 on:
   schedule:
-    - cron: '59 14 * * *'
-  workflow_dispatch:
+    - cron: '59 14 * * *' # 每天定时运行
+  workflow_dispatch:      # 支持手动触发
 
 jobs:
   build:
@@ -18,16 +18,38 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        # ⚠️ 已经移除了所有沉重的文档解析库，只保留四大核心库，运行速度起飞！
         run: |
           pip install notion-client google-genai requests cloudinary
 
       - name: Run Auto-Pilot
+        id: autopilot
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           DATABASE_ID: ${{ secrets.DATABASE_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} 
-          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
-          ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
           CLOUDINARY_URL: ${{ secrets.CLOUDINARY_URL }}
-        run: python -u main.py
+        # 使用 2> 将错误日志重定向，并确保脚本即使报错也继续执行后续的 Self-Healing
+        run: python -u main.py 2> error.log
+        continue-on-error: true
+
+      - name: AI Self-Healing
+        # 只有当 error.log 文件不为空时才运行
+        if: always()
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_REPO: ${{ github.repository }}
+        run: |
+          if [ -s error.log ]; then
+            echo "发现错误日志，启动自愈程序..."
+            python self_healer.py
+          else
+            echo "未发现错误，流程正常。"
+          fi
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-logs
+          path: error.log
