@@ -107,8 +107,9 @@ def generate_visual_assets(page_id, script_text, style_seed):
     剧本内容：{script_text[:3000]}
     """
     try:
+        # ⚠️ 升级为最新的 gemini-2.0-flash 模型
         response = gemini_client.models.generate_content(
-            model='gemini-1.5-pro-latest', 
+            model='gemini-2.0-flash', 
             contents=prompt
         )
         json_str = response.text.strip().removeprefix("```json").removesuffix("```").strip()
@@ -223,8 +224,9 @@ def process_magazine():
                 break
             time.sleep(3)
 
+        # ⚠️ 升级为最新的 gemini-2.0-flash 模型
         response = gemini_client.models.generate_content(
-            model='gemini-1.5-pro-latest', 
+            model='gemini-2.0-flash', 
             contents=[instruction, gemini_file]
         )
         generated_script = response.text
