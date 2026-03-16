@@ -2,11 +2,11 @@ import os
 import datetime
 import requests
 import json
-import time
 from google import genai
 from notion_client import Client
 import cloudinary
 import cloudinary.uploader
+from pypdf import PdfReader  # ⚠️ 引入本地 PDF 解析库
 
 # ==========================================
 # 1. 环境与密钥配置
@@ -18,7 +18,6 @@ ELEVEN_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID")
 CLOUDINARY_URL = os.environ.get("CLOUDINARY_URL")
 
-# 强制锁定 Notion 服务器处理版本为最经典的 2022-06-28，防止 API 更新导致的报错
 notion = Client(auth=NOTION_TOKEN, notion_version="2022-06-28")
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -40,8 +39,23 @@ def download_file(url, local_path):
         print(f"下载文件失败: {e}")
     return False
 
+def extract_text_from_pdf(pdf_path, max_chars=40000):
+    """⚠️ 新增功能：本地提取 PDF 纯文本，过滤图片，限制字数防超载"""
+    text = ""
+    try:
+        reader = PdfReader(pdf_path)
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + "\n"
+            # 达到字数限制提前结束，避免浪费算力
+            if len(text) > max_chars:
+                break
+    except Exception as e:
+        print(f"PDF 本地解析出错: {e}")
+    return text[:max_chars]
+
 def write_script_to_notion(page_id, script_text):
-    # 放弃使用页面的 update 方法，直接调用底层 API 写入，绕过 SDK 限制
     if len(script_text) <= 2000:
         notion.request(
             path=f"pages/{page_id}",
@@ -107,7 +121,6 @@ def generate_visual_assets(page_id, script_text, style_seed):
     剧本内容：{script_text[:3000]}
     """
     try:
-        # ⚠️ 升级为最新的 gemini-2.0-flash 模型
         response = gemini_client.models.generate_content(
             model='gemini-2.0-flash', 
             contents=prompt
@@ -115,7 +128,6 @@ def generate_visual_assets(page_id, script_text, style_seed):
         json_str = response.text.strip().removeprefix("```json").removesuffix("```").strip()
         chapters = json.loads(json_str)
         
-        # 直接发送 HTTP POST 请求新建内嵌表格，绕过 SDK
         new_db = notion.request(
             path="databases",
             method="POST",
@@ -156,7 +168,6 @@ def process_magazine():
     print(f"=== 开始执行自动制片流 | 日期: {today} ===")
     
     try:
-        # 彻底抛弃 .query() 语法，直接请求数据库内容
         tasks_response = notion.request(
             path=f"databases/{DATABASE_ID}/query",
             method="POST",
@@ -188,7 +199,6 @@ def process_magazine():
         seed_prop = page["properties"].get("视觉风格种子", {}).get("rich_text", [])
         style_seed = "".join([t["plain_text"] for t in seed_prop]) if seed_prop else "白色、淡蓝色、极简科技感"
         
-        # 兼容 Files & Media 与 Files & media
         files = page["properties"].get("Files & Media", {}).get("files", [])
         if not files:
             files = page["properties"].get("Files & media", {}).get("files", [])
@@ -208,38 +218,28 @@ def process_magazine():
         if not download_file(file_url, local_file_path):
             continue
 
-        print("2. Gemini 正在深度阅读并创作剧本...")
-        gemini_file = gemini_client.files.upload(file=local_file_path)
-        
-        # 智能防护：等待大文件在云端处理完成
-        print(" -> 等待 Gemini 云端解析 PDF (这可能需要十几秒)...")
-        while True:
-            file_info_gemini = gemini_client.files.get(name=gemini_file.name)
-            state_str = str(file_info_gemini.state)
-            if "ACTIVE" in state_str:
-                print(" -> PDF 解析完成！开始生成剧本...")
-                break
-            elif "FAILED" in state_str:
-                print(" -> ⚠️ PDF 解析失败！跳过此任务。")
-                break
-            time.sleep(3)
+        # ⚠️ 彻底改变的流程：本地提取纯文本
+        print("2. 正在本地提取 PDF 纯文本 (智能瘦身)...")
+        pdf_text = extract_text_from_pdf(local_file_path, max_chars=40000)
+        print(f" -> 成功提取 {len(pdf_text)} 字核心内容。")
 
-        # ⚠️ 升级为最新的 gemini-2.0-flash 模型
+        print("3. Gemini 正在基于纯文本创作剧本...")
+        # 将指令和纯文本合并为单一 prompt 发送
+        combined_prompt = f"{instruction}\n\n以下是杂志提取的核心内容：\n{pdf_text}"
         response = gemini_client.models.generate_content(
             model='gemini-2.0-flash', 
-            contents=[instruction, gemini_file]
+            contents=combined_prompt
         )
         generated_script = response.text
         write_script_to_notion(page_id, generated_script)
 
-        print("3. ElevenLabs 正在生成配音...")
+        print("4. ElevenLabs 正在生成配音...")
         audio_path = f"/tmp/{page_id}.mp3"
         if text_to_speech(generated_script, audio_path):
             print(" -> 正在上传音频至 Cloudinary...")
             upload_result = cloudinary.uploader.upload(audio_path, resource_type="video")
             audio_url = upload_result.get("secure_url")
             
-            # 使用原生 request 挂载音频
             notion.request(
                 path=f"pages/{page_id}",
                 method="PATCH",
@@ -247,13 +247,12 @@ def process_magazine():
             )
             print(" -> 音频链接已挂载回 Notion。")
         
-        print("4. 正在规划视频翻页镜头...")
+        print("5. 正在规划视频翻页镜头...")
         generate_visual_assets(page_id, generated_script, style_seed)
 
-        print("5. 清理临时环境...")
+        print("6. 清理临时环境...")
         if os.path.exists(local_file_path): os.remove(local_file_path)
         if os.path.exists(audio_path): os.remove(audio_path)
-        gemini_client.files.delete(name=gemini_file.name) 
         
         print(f"=== {file_name} 自动化流程全部完成！===")
 
