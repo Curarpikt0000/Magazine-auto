@@ -3,91 +3,77 @@ import datetime
 import requests
 import google.generativeai as genai
 from notion_client import Client
+import cloudinary
+import cloudinary.uploader
 
 # 环境配置
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 DATABASE_ID = os.environ["DATABASE_ID"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+ELEVEN_API_KEY = os.environ["ELEVENLABS_API_KEY"]
+VOICE_ID = os.environ["ELEVENLABS_VOICE_ID"]
 
-# 初始化客户端
+# 初始化
 notion = Client(auth=NOTION_TOKEN)
 genai.configure(api_key=GEMINI_API_KEY)
+cloudinary.config(cloudinary_url=os.environ["CLOUDINARY_URL"])
 
-def download_file(url, local_path):
-    """从 Notion URL 下载文件到本地"""
-    response = requests.get(url, stream=True)
+def text_to_speech(text, output_path):
+    """调用 ElevenLabs V3 模型生成音频"""
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": ELEVEN_API_KEY
+    }
+    data = {
+        "text": text,
+        "model_id": "eleven_multilingual_v3",
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}
+    }
+    response = requests.post(url, json=data, headers=headers)
     if response.status_code == 200:
-        with open(local_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+        with open(output_path, "wb") as f:
+            f.write(response.content)
         return True
     return False
 
 def process_magazine():
-    # 获取东京时间 (JST) 的今天日期
     today = (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).date().isoformat()
     
-    # 筛选逻辑：Category="杂志" 且 阅读日期为今天
+    # 筛选：Category="杂志" + 今日日期 + 音频为空
     query = notion.databases.query(
         database_id=DATABASE_ID,
         filter={
             "and": [
                 {"property": "Category", "select": {"equals": "杂志"}},
                 {"property": "阅读日期", "date": {"equals": today}},
-                {"property": "深度解析脚本", "rich_text": {"is_empty": True}}
+                {"property": "深度解析音频", "files": {"is_empty": True}}
             ]
         }
     )
     
-    tasks = query.get("results")
-    if not tasks:
-        print(f"[{today}] 未发现待处理的杂志任务。")
-        return
-
-    model = genai.GenerativeModel('gemini-1.5-pro')
-
-    for page in tasks:
+    for page in query.get("results", []):
         page_id = page["id"]
-        # 读取“脚本要求”列的内容
-        req_prop = page["properties"].get("脚本要求", {}).get("rich_text", [])
-        instruction = "".join([t["plain_text"] for t in req_prop]) if req_prop else "请写一份深度讲解脚本。"
+        # 1. 获取指令并使用 Gemini 生成脚本 (同上一步)
+        # ... (此处省略上一步已实现的 Gemini 解析代码，获取 generated_script) ...
         
-        # 获取 Files & Media 链接
-        files = page["properties"].get("Files & Media", {}).get("files", [])
-        if not files: continue
-        
-        file_info = files[0]
-        file_url = file_info.get("file", {}).get("url") or file_info.get("external", {}).get("url")
-        file_name = file_info.get("name", "magazine.pdf")
-        local_file_path = os.path.join("/tmp", file_name)
-
-        # 1. 下载文件到本地
-        print(f"正在下载文件: {file_name}...")
-        if download_file(file_url, local_file_path):
-            # 2. 上传文件至 Gemini
-            print(f"正在上传至 Gemini 进行分析...")
-            gemini_file = genai.upload_file(path=local_file_path, mime_type="application/pdf")
+        # 2. 生成音频
+        audio_path = f"/tmp/{page_id}.mp3"
+        print("正在合成 ChaoJ 语音...")
+        if text_to_speech(generated_script, audio_path):
             
-            # 3. 生成内容
-            response = model.generate_content([instruction, gemini_file])
-            generated_script = response.text
+            # 3. 上传至 Cloudinary 获取永久外链
+            print("正在上传音频至云端...")
+            upload_result = cloudinary.uploader.upload(audio_path, resource_type="video")
+            audio_url = upload_result.get("secure_url")
             
-            # 4. 回写 Notion 脚本列
+            # 4. 更新 Notion (回写脚本 + 回写音频外链)
             notion.pages.update(
                 page_id=page_id,
                 properties={
-                    "深度解析脚本": {
-                        "rich_text": [{"text": {"content": generated_script}}]
-                    }
+                    "深度解析脚本": {"rich_text": [{"text": {"content": generated_script}}]},
+                    "深度解析音频": {"files": [{"name": "深度解析音频.mp3", "external": {"url": audio_url}}]}
                 }
             )
-            print(f"成功！已为 {file_name} 生成深度解析脚本。")
-            
-            # 清理临时文件
-            if os.path.exists(local_file_path):
-                os.remove(local_file_path)
-        else:
-            print(f"下载失败: {file_url}")
-
-if __name__ == "__main__":
-    process_magazine()
+            print(f"成功！音频已就绪: {audio_url}")
