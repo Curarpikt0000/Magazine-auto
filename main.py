@@ -7,7 +7,8 @@ from google import genai
 from notion_client import Client
 import cloudinary
 import cloudinary.uploader
-import fitz  # ⚠️ 引入工业级 PyMuPDF 解析库
+import fitz  # PDF 解析库
+import docx  # ⚠️ 新增的 Word 解析库
 
 # ==========================================
 # 1. 环境与密钥配置
@@ -19,7 +20,6 @@ ELEVEN_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID")
 CLOUDINARY_URL = os.environ.get("CLOUDINARY_URL")
 
-# 强制锁定 Notion 服务器处理版本为最经典的 2022-06-28，防止 API 更新导致的报错
 notion = Client(auth=NOTION_TOKEN, notion_version="2022-06-28")
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -42,7 +42,6 @@ def download_file(url, local_path):
     return False
 
 def extract_text_from_pdf(pdf_path, max_chars=40000):
-    """使用工业级 PyMuPDF 解析复杂杂志文本，过滤图片，限制字数防超载"""
     text = ""
     try:
         doc = fitz.open(pdf_path)
@@ -50,20 +49,28 @@ def extract_text_from_pdf(pdf_path, max_chars=40000):
             extracted = page.get_text()
             if extracted:
                 text += extracted + "\n"
-            # 达到字数限制提前结束，避免浪费算力
             if len(text) > max_chars:
                 break
         doc.close()
     except Exception as e:
         print(f"⚠️ PDF 本地解析出错: {e}")
-        
-    if len(text.strip()) < 100:
-        print("⚠️ 警告：提取到的有效文字极少！这可能是一本全图片/扫描版杂志。")
-        
+    return text[:max_chars]
+
+def extract_text_from_docx(docx_path, max_chars=40000):
+    """⚠️ 新增功能：专门解析 Word 文档"""
+    text = ""
+    try:
+        doc = docx.Document(docx_path)
+        for para in doc.paragraphs:
+            if para.text.strip():
+                text += para.text + "\n"
+            if len(text) > max_chars:
+                break
+    except Exception as e:
+        print(f"⚠️ Word 本地解析出错: {e}")
     return text[:max_chars]
 
 def write_script_to_notion(page_id, script_text):
-    # 放弃使用页面的 update 方法，直接调用底层 API 写入，绕过 SDK 限制
     if len(script_text) <= 2000:
         notion.request(
             path=f"pages/{page_id}",
@@ -136,7 +143,6 @@ def generate_visual_assets(page_id, script_text, style_seed):
         json_str = response.text.strip().removeprefix("```json").removesuffix("```").strip()
         chapters = json.loads(json_str)
         
-        # 直接发送 HTTP POST 请求新建内嵌表格，绕过 SDK
         new_db = notion.request(
             path="databases",
             method="POST",
@@ -177,7 +183,6 @@ def process_magazine():
     print(f"=== 开始执行自动制片流 | 日期: {today} ===")
     
     try:
-        # 彻底抛弃 .query() 语法，直接请求数据库内容
         tasks_response = notion.request(
             path=f"databases/{DATABASE_ID}/query",
             method="POST",
@@ -209,7 +214,6 @@ def process_magazine():
         seed_prop = page["properties"].get("视觉风格种子", {}).get("rich_text", [])
         style_seed = "".join([t["plain_text"] for t in seed_prop]) if seed_prop else "白色、淡蓝色、极简科技感"
         
-        # 兼容 Files & Media 与 Files & media
         files = page["properties"].get("Files & Media", {}).get("files", [])
         if not files:
             files = page["properties"].get("Files & media", {}).get("files", [])
@@ -220,22 +224,34 @@ def process_magazine():
             
         file_info = files[0]
         file_url = file_info.get("file", {}).get("url") or file_info.get("external", {}).get("url")
-        file_name = file_info.get("name", "magazine.pdf")
+        file_name = file_info.get("name", "document")
         local_file_path = os.path.join("/tmp", file_name)
 
         print(f"\n--- 开始处理: {file_name} ---")
 
-        print("1. 正在下载杂志 PDF...")
+        print("1. 正在下载文件...")
         if not download_file(file_url, local_file_path):
             continue
 
-        print("2. 正在本地提取 PDF 纯文本 (智能瘦身)...")
-        pdf_text = extract_text_from_pdf(local_file_path, max_chars=40000)
-        print(f" -> 成功提取 {len(pdf_text)} 字核心内容。")
+        print("2. 正在本地提取纯文本 (智能瘦身)...")
+        # ⚠️ 自动判断文件类型
+        extracted_text = ""
+        if file_name.lower().endswith('.pdf'):
+            extracted_text = extract_text_from_pdf(local_file_path, max_chars=40000)
+        elif file_name.lower().endswith('.docx'):
+            extracted_text = extract_text_from_docx(local_file_path, max_chars=40000)
+        else:
+            print(f"⚠️ 暂不支持此文件格式，跳过提取。")
+            continue
+            
+        print(f" -> 成功提取 {len(extracted_text)} 字核心内容。")
+
+        if len(extracted_text.strip()) < 100:
+            print("⚠️ 警告：提取到的有效文字极少，将跳过生成步骤。")
+            continue
 
         print("3. Gemini 正在基于纯文本创作剧本...")
-        # 将指令和纯文本合并为单一 prompt 发送
-        combined_prompt = f"{instruction}\n\n以下是杂志提取的核心内容：\n{pdf_text}"
+        combined_prompt = f"{instruction}\n\n以下是提取的核心内容：\n{extracted_text}"
         response = gemini_client.models.generate_content(
             model='gemini-2.0-flash', 
             contents=combined_prompt
@@ -250,7 +266,6 @@ def process_magazine():
             upload_result = cloudinary.uploader.upload(audio_path, resource_type="video")
             audio_url = upload_result.get("secure_url")
             
-            # 使用原生 request 挂载音频
             notion.request(
                 path=f"pages/{page_id}",
                 method="PATCH",
