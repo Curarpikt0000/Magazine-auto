@@ -2,7 +2,7 @@ import os
 import datetime
 import requests
 import json
-from google import genai # ⚠️ 已升级为最新的 SDK
+from google import genai
 from notion_client import Client
 import cloudinary
 import cloudinary.uploader
@@ -17,9 +17,7 @@ ELEVEN_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID")
 CLOUDINARY_URL = os.environ.get("CLOUDINARY_URL")
 
-# 初始化客户端
 notion = Client(auth=NOTION_TOKEN)
-# ⚠️ 使用新版 Gemini 客户端初始化方式
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 if CLOUDINARY_URL:
@@ -30,7 +28,6 @@ if CLOUDINARY_URL:
 # ==========================================
 
 def download_file(url, local_path):
-    """从 Notion 下载 PDF 杂志到本地临时目录"""
     try:
         response = requests.get(url, stream=True, timeout=30)
         if response.status_code == 200:
@@ -43,7 +40,6 @@ def download_file(url, local_path):
     return False
 
 def write_script_to_notion(page_id, script_text):
-    """智能写入脚本：判断字数，超长则自动拆分写入页面正文"""
     if len(script_text) <= 2000:
         notion.pages.update(
             page_id=page_id,
@@ -78,7 +74,6 @@ def write_script_to_notion(page_id, script_text):
         print(" -> 脚本较长，已安全切割并写入页面正文。")
 
 def text_to_speech(text, output_path):
-    """调用 ElevenLabs 生成音频"""
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
     headers = {
         "Accept": "audio/mpeg",
@@ -104,7 +99,6 @@ def text_to_speech(text, output_path):
     return False
 
 def generate_visual_assets(page_id, script_text, style_seed):
-    """利用 Gemini 拆解章节，并在 Notion 内创建 Inline Database 素材库"""
     print(f"正在根据风格 [{style_seed}] 拆解视觉分镜...")
     
     prompt = f"""
@@ -120,29 +114,36 @@ def generate_visual_assets(page_id, script_text, style_seed):
     """
     
     try:
-        # ⚠️ 使用新版 API 调用结构
         response = gemini_client.models.generate_content(
             model='gemini-1.5-pro',
             contents=prompt
         )
-        
         json_str = response.text.strip().removeprefix("```json").removesuffix("```").strip()
         chapters = json.loads(json_str)
         
+        # ⚠️ 【关键修复】：新版 API 创建表格时，属性必须放在 initial_data_source 里
         new_db = notion.databases.create(
-            parent={"page_id": page_id},
+            parent={"type": "page_id", "page_id": page_id},
             title=[{"type": "text", "text": {"content": f"🎬 YouTube 翻页素材库 (风格: {style_seed})" }}],
-            properties={
-                "章节标题": {"title": {}},
-                "建议时间戳": {"rich_text": {}},
-                "视觉提示词 (Prompt)": {"rich_text": {}}
+            initial_data_source={
+                "properties": {
+                    "章节标题": {"title": {}},
+                    "建议时间戳": {"rich_text": {}},
+                    "视觉提示词 (Prompt)": {"rich_text": {}}
+                }
             }
         )
-        db_id = new_db["id"]
+        
+        # 提取新表格的 data_source_id
+        new_data_source_id = new_db["data_sources"][0]["id"]
         
         for item in chapters:
+            # ⚠️ 【关键修复】：新版 API 在表格里加行，必须用 data_source_id 作为 parent
             notion.pages.create(
-                parent={"database_id": db_id},
+                parent={
+                    "type": "data_source_id",
+                    "data_source_id": new_data_source_id
+                },
                 properties={
                     "章节标题": {"title": [{"text": {"content": item.get('chapter', '未命名')}}]},
                     "建议时间戳": {"rich_text": [{"text": {"content": item.get('timestamp', '00:00')}}]},
@@ -161,18 +162,27 @@ def process_magazine():
     today = (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).date().isoformat()
     print(f"=== 开始执行自动制片流 | 日期: {today} ===")
     
-    query = notion.databases.query(
-        database_id=DATABASE_ID,
-        filter={
-            "and": [
-                {"property": "Category", "select": {"equals": "杂志"}},
-                {"property": "阅读日期", "date": {"equals": today}},
-                {"property": "深度解析脚本", "rich_text": {"is_empty": True}}
-            ]
-        }
-    )
-    
-    tasks = query.get("results")
+    try:
+        # ⚠️ 【关键修复】：先拿主表的 Data Source ID
+        db_info = notion.databases.retrieve(database_id=DATABASE_ID)
+        main_data_source_id = db_info["data_sources"][0]["id"]
+        
+        # ⚠️ 【关键修复】：使用 data_sources.query 进行筛选
+        query = notion.data_sources.query(
+            data_source_id=main_data_source_id,
+            filter={
+                "and": [
+                    {"property": "Category", "select": {"equals": "杂志"}},
+                    {"property": "阅读日期", "date": {"equals": today}},
+                    {"property": "深度解析脚本", "rich_text": {"is_empty": True}}
+                ]
+            }
+        )
+        tasks = query.get("results")
+    except Exception as e:
+        print(f"⚠️ 无法查询 Notion 表格，请检查 API Token 或 表格 ID: {e}")
+        return
+
     if not tasks:
         print(f"未发现今天 ({today}) 需要处理的杂志任务。")
         return
@@ -203,7 +213,6 @@ def process_magazine():
             continue
 
         print("2. Gemini 正在深度阅读并创作剧本...")
-        # ⚠️ 适应新版 API 的文件上传方法
         gemini_file = gemini_client.files.upload(file=local_file_path)
         response = gemini_client.models.generate_content(
             model='gemini-1.5-pro',
@@ -212,7 +221,7 @@ def process_magazine():
         generated_script = response.text
         write_script_to_notion(page_id, generated_script)
 
-        print("3. ElevenLabs 正在生成 ChaoJ 的配音...")
+        print("3. ElevenLabs 正在生成配音...")
         audio_path = f"/tmp/{page_id}.mp3"
         if text_to_speech(generated_script, audio_path):
             print(" -> 正在上传音频至 Cloudinary...")
@@ -233,7 +242,6 @@ def process_magazine():
         print("5. 清理临时环境...")
         if os.path.exists(local_file_path): os.remove(local_file_path)
         if os.path.exists(audio_path): os.remove(audio_path)
-        # ⚠️ 适应新版 API 的文件删除方法
         gemini_client.files.delete(name=gemini_file.name) 
         
         print(f"=== {file_name} 自动化流程全部完成！===")
