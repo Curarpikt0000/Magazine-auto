@@ -1,79 +1,64 @@
 import os
-import datetime
-import requests
-import google.generativeai as genai
 from notion_client import Client
-import cloudinary
-import cloudinary.uploader
 
-# 环境配置
-NOTION_TOKEN = os.environ["NOTION_TOKEN"]
-DATABASE_ID = os.environ["DATABASE_ID"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-ELEVEN_API_KEY = os.environ["ELEVENLABS_API_KEY"]
-VOICE_ID = os.environ["ELEVENLABS_VOICE_ID"]
+notion = Client(auth=os.environ["NOTION_TOKEN"])
 
-# 初始化
-notion = Client(auth=NOTION_TOKEN)
-genai.configure(api_key=GEMINI_API_KEY)
-cloudinary.config(cloudinary_url=os.environ["CLOUDINARY_URL"])
-
-def text_to_speech(text, output_path):
-    """调用 ElevenLabs V3 模型生成音频"""
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
-    headers = {
-        "Accept": "audio/mpeg",
-        "Content-Type": "application/json",
-        "xi-api-key": ELEVEN_API_KEY
-    }
-    data = {
-        "text": text,
-        "model_id": "eleven_multilingual_v3",
-        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}
-    }
-    response = requests.post(url, json=data, headers=headers)
-    if response.status_code == 200:
-        with open(output_path, "wb") as f:
-            f.write(response.content)
-        return True
-    return False
-
-def process_magazine():
-    today = (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).date().isoformat()
-    
-    # 筛选：Category="杂志" + 今日日期 + 音频为空
-    query = notion.databases.query(
-        database_id=DATABASE_ID,
-        filter={
-            "and": [
-                {"property": "Category", "select": {"equals": "杂志"}},
-                {"property": "阅读日期", "date": {"equals": today}},
-                {"property": "深度解析音频", "files": {"is_empty": True}}
-            ]
-        }
-    )
-    
-    for page in query.get("results", []):
-        page_id = page["id"]
-        # 1. 获取指令并使用 Gemini 生成脚本 (同上一步)
-        # ... (此处省略上一步已实现的 Gemini 解析代码，获取 generated_script) ...
+def write_script_to_notion(page_id, script_text):
+    """
+    判断字数并写入 Notion。
+    如果超过 2000 字符，写入正文；否则写入属性列。
+    """
+    if len(script_text) <= 2000:
+        # 字数较少，直接写入属性列
+        notion.pages.update(
+            page_id=page_id,
+            properties={
+                "深度解析脚本": {"rich_text": [{"text": {"content": script_text}}]}
+            }
+        )
+        print("脚本已写入属性列。")
+    else:
+        # 字数超限，写入属性列作为提醒，并将全文写入正文
+        notion.pages.update(
+            page_id=page_id,
+            properties={
+                "深度解析脚本": {"rich_text": [{"text": {"content": "⚠️ 脚本较长，全文已写入页面正文。"}}] }
+            }
+        )
         
-        # 2. 生成音频
-        audio_path = f"/tmp/{page_id}.mp3"
-        print("正在合成 ChaoJ 语音...")
-        if text_to_speech(generated_script, audio_path):
-            
-            # 3. 上传至 Cloudinary 获取永久外链
-            print("正在上传音频至云端...")
-            upload_result = cloudinary.uploader.upload(audio_path, resource_type="video")
-            audio_url = upload_result.get("secure_url")
-            
-            # 4. 更新 Notion (回写脚本 + 回写音频外链)
-            notion.pages.update(
-                page_id=page_id,
-                properties={
-                    "深度解析脚本": {"rich_text": [{"text": {"content": generated_script}}]},
-                    "深度解析音频": {"files": [{"name": "深度解析音频.mp3", "external": {"url": audio_url}}]}
+        # 将长文本按段落拆分，写入页面正文 (Notion 每个 Block 限制也是 2000 字符)
+        # 这里我们将脚本切片，每 1500 字符作为一个段落 Block 写入
+        chunks = [script_text[i:i+1500] for i in range(0, len(script_text), 1500)]
+        children = [
+            {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"type": "text", "text": {"content": chunk}}]
                 }
-            )
-            print(f"成功！音频已就绪: {audio_url}")
+            } for chunk in chunks
+        ]
+        
+        # 写入正文
+        notion.blocks.children.append(block_id=page_id, children=children)
+        print("脚本较长，已成功写入页面正文。")
+
+def get_full_script_for_next_step(page_id):
+    """
+    供后续步骤（章节拆解）调用的函数：
+    它会自动判断是从‘列’里读，还是从‘正文’里读。
+    """
+    page = notion.pages.retrieve(page_id=page_id)
+    prop_text = "".join([t["plain_text"] for t in page["properties"]["深度解析脚本"]["rich_text"]])
+    
+    if "全文已写入页面正文" in prop_text:
+        # 从正文提取所有 paragraph 类型的 blocks
+        blocks = notion.blocks.children.list(block_id=page_id).get("results", [])
+        full_text = ""
+        for block in blocks:
+            if block["type"] == "paragraph":
+                block_text = "".join([t["plain_text"] for t in block["paragraph"]["rich_text"]])
+                full_text += block_text + "\n"
+        return full_text
+    else:
+        return prop_text
