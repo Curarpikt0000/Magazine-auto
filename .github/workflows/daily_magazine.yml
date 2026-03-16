@@ -10,17 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4  # ⚠️ 已升级，消除 Node.js 警告
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5  # ⚠️ 已升级，消除 Node.js 警告
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
-        # 不再纠结降级，直接安装最新版
+        # ⚠️ 新增了 pypdf 库用于本地解析 PDF
         run: |
-          pip install notion-client google-genai requests cloudinary
+          pip install notion-client google-genai requests cloudinary pypdf
 
       - name: Run Auto-Pilot
         env:
