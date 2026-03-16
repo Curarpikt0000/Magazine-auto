@@ -183,7 +183,7 @@ def process_magazine():
         seed_prop = page["properties"].get("视觉风格种子", {}).get("rich_text", [])
         style_seed = "".join([t["plain_text"] for t in seed_prop]) if seed_prop else "白色、淡蓝色、极简科技感"
         
-        files = page["properties"].get("Files & Media", {}).get("files", [])
+        files = page["properties"].get("Files & media", {}).get("files", [])
         if not files:
             print(f"跳过页面 {page_id}：没有找到杂志文件。")
             continue
